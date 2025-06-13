@@ -1,0 +1,21 @@
+name,department,college_name,year,section,email,register_number
+Arjun Sharma,CSE,SNSCT,I,A,arjun.sharma@example.com,2021CSE101
+Priya Nair,IT,SNSCT,II,B,priya.nair@example.com,2021IT102
+Vikram Patel,AIDS,SNSCT,1,A,vikram.patel@example.com,2022AIDS103
+Ananya Gupta,CSE,SNSCT,2,B,ananya.gupta@example.com,2021cse104
+Rohan Mehta,CSE,SNSCT,I,A,rohan.mehta@example.com,2021CSE105
+Sanya Reddy,IT,SNSCT,II,B,sanya.reddy@example.com,2022IT106
+Kiran Desai,CSE,SNSCT,1,A,kiran.desai@example.com,2021CSE107
+Neha Kulkarni,AIDS,SNSCT,2,B,neha.kulkarni@example.com,2022AIDS108
+Aditya Rao,CSE,SNSCT,I,A,aditya.rao@example.com,2021CSE109
+Tara Joshi,IT,SNSCT,II,B,tara.joshi@example.com,2021IT110
+,IT,SNSCT,I,A,missing.name@example.com,2021IT111
+Invalid@Name,CSE,SNSCT,II,B,invalid.name@example.com,2021CSE112
+Ravi Kumar,CSE,SNSCT,III,A,ravi.kumar@example.com,2021CSE101
+Meera Singh,CSE,SNSCT,I,A,arjun.sharma@example.com,2021CSE113
+Amit Bose,CSE,SNSCT,I,A,invalid.email,2021CSE114
+Suman Iyer,CSE,SNSCT,V,A,suman.iyer@example.com,2021CSE115
+Deepa Varghese,CSE,SNSCT,II,AB,deepa.varghese@example.com,2021CSE116
+Karthik Menon,CSE,SNSCT,1,A,karthik.menon@example.com,1999CSE117
+Shreya Pillai,CSE,SNSCT,2,B,shreya.pillai@example.com,2021XYZ118
+Lakshmi Rao,CSE,SNSCT,I,A,lakshmi.rao@example.com,2021CSE12
