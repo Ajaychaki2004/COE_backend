@@ -667,51 +667,45 @@ def process_answer_sheet_with_ai(pdf_path, exam_id, student_id):
         
         # Step 1: Process the PDF pages with red ink filtering
         def pdf_to_images(pdf_path):
-            # HARDCODED POPPLER PATH - for Windows
-            poppler_path = r'C:\Program Files\poppler-24.08.0\Library\bin'
-            print(f"Using Poppler path: {poppler_path}")
-            
-            try:
-                # First try with Poppler path
-                pages = convert_from_path(pdf_path, poppler_path=poppler_path)
-                print(f"Successfully converted PDF to {len(pages)} pages using poppler_path")
-            except Exception as e:
-                print(f"Failed with poppler_path, trying without it: {str(e)}")
-                # Fallback to no path specification
-                pages = convert_from_path(pdf_path)
-                print(f"Successfully converted PDF to {len(pages)} pages without specifying poppler_path")
-                
+            import platform
+            # Check if system is Windows
+            if platform.system() == "Windows":
+                poppler_path = r'C:\Program Files\poppler-24.08.0\Library\bin'
+                print(f"Using Poppler path (Windows): {poppler_path}")
+                try:
+                    pages = convert_from_path(pdf_path, poppler_path=poppler_path)
+                except Exception as e:
+                    print(f"Failed with poppler_path: {e}")
+                    return []
+            else:
+                # On Linux (Render), poppler should be in PATH
+                print("Running on Linux - using system PATH for Poppler.")
+                try:
+                    pages = convert_from_path(pdf_path)
+                except Exception as e:
+                    print(f"Failed without poppler_path: {e}")
+                    return []
+
+            # (Your image processing code stays the same...)
             processed_pages = []
 
             for i, page in enumerate(pages):
                 print(f"Processing page {i+1}/{len(pages)}")
-                # Convert PIL Image to numpy array for OpenCV
                 img_np = np.array(page)
-
-                # Convert to BGR for OpenCV
                 img_cv = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
-
-                # Filter out red ink using HSV color space
                 hsv = cv2.cvtColor(img_cv, cv2.COLOR_BGR2HSV)
 
-                # Define red color range in HSV
                 lower_red1 = np.array([0, 100, 100])
                 upper_red1 = np.array([10, 255, 255])
                 lower_red2 = np.array([160, 100, 100])
                 upper_red2 = np.array([180, 255, 255])
 
-                # Create masks for red color
                 mask1 = cv2.inRange(hsv, lower_red1, upper_red1)
                 mask2 = cv2.inRange(hsv, lower_red2, upper_red2)
                 red_mask = cv2.bitwise_or(mask1, mask2)
-
-                # Invert mask to get non-red areas
                 non_red_mask = cv2.bitwise_not(red_mask)
 
-                # Apply mask to keep only non-red pixels
                 filtered_img = cv2.bitwise_and(img_cv, img_cv, mask=non_red_mask)
-
-                # Convert back to RGB and then to PIL Image
                 filtered_rgb = cv2.cvtColor(filtered_img, cv2.COLOR_BGR2RGB)
                 filtered_pil = PIL.Image.fromarray(filtered_rgb)
 
