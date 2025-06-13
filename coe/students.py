@@ -49,26 +49,62 @@ rubrics_collection = db["rubrics"]
 @csrf_exempt
 def get_all_students(request):
     """
-    Returns all student entries from the MongoDB 'student' collection,
-    including the '_id' field as a string.
+    Returns all student entries from the MongoDB 'student' collection.
+    If 'college_name' is provided in the request body (POST),
+    filters students by that college — unless it is 'superadmin',
+    in which case all students are returned.
     """
-    if request.method != "GET":
+    if request.method != "POST":
         return JsonResponse({"error": "Invalid request method"}, status=405)
 
     try:
         student_collection = db["student"]
-        students_cursor = student_collection.find({})
 
-        # Convert ObjectId to string and build the response list
+        # Parse JSON payload
+        data = json.loads(request.body.decode("utf-8")) if request.body else {}
+        college_name = data.get("college_name")
+
+        # Special case for superadmin
+        if college_name and college_name.lower() != "superadmin":
+            query = {"college_name": college_name}
+        else:
+            query = {}  # No filter, return all students
+
+        students_cursor = student_collection.find(query)
+
         students = []
         for student in students_cursor:
+            # Handle the _id field
             student['_id'] = str(student['_id'])
+            
+            # Ensure essential fields exist and are standardized
+            for field in ['name', 'department', 'year', 'batch', 'register_number', 'status']:
+                if field not in student or student[field] is None:
+                    student[field] = ""
+                elif isinstance(student[field], str):
+                    # Trim whitespace from string fields
+                    student[field] = student[field].strip()
+            
+            # Ensure department is consistent and not empty
+            if not student['department']:
+                student['department'] = "Unassigned"
+                
+            # Ensure year is properly formatted 
+            if student['year'] and not isinstance(student['year'], str):
+                student['year'] = str(student['year'])
+                
+            # Ensure status has a default value
+            if not student['status']:
+                student['status'] = "Active"
+                
             students.append(student)
 
         return JsonResponse({"students": students}, status=200)
 
     except Exception as e:
+        print(f"Error in get_all_students: {str(e)}")
         return JsonResponse({"error": str(e)}, status=500)
+
     
 @csrf_exempt
 def add_student(request):
@@ -571,7 +607,6 @@ def get_student_semester_report(request, rollno=None, subject_code=None):
         if not rollno or not subject_code:
             return JsonResponse({"error": "Missing student roll number or subject code"}, status=400)
 
-        # Get student info
         student_info = student_collection.find_one({"register_number": rollno})
         if not student_info:
             return JsonResponse({"error": f"Student not found: {rollno}"}, status=404)
@@ -585,35 +620,28 @@ def get_student_semester_report(request, rollno=None, subject_code=None):
             "section": student_info.get("section", "")
         }
 
-        # Find all results for this student and subject
         query = {
             "results.subjects.subject_code": subject_code,
             "results.subjects.students.register_number": rollno
         }
 
         result_docs = results_collection.find(query)
-        exam_results = []
 
-        # Placeholder to calculate overall summary
         total_marks_by_exam_type = {}
         total_count_by_exam_type = {}
         pass_count = 0
         fail_count = 0
         bloom_counter = {}
         co_counter = {}
-        grade_distribution = {
-            "O": 0,
-            "A+": 0,
-            "A": 0,
-            "B+": 0,
-            "B": 0,
-            "Others": 0
-        }
-
+        grade_distribution = {"O": 0, "A+": 0, "A": 0, "B+": 0, "B": 0, "Others": 0}
         ai_scores = []
         staff_scores = []
         ai_full_marks = []
         staff_full_marks = []
+        iae_stats = {}
+        semester_stats = {}
+        exam_results = []
+        previous_iae_mark = None
 
         def get_grade(marks):
             if marks >= 91: return "O"
@@ -623,8 +651,124 @@ def get_student_semester_report(request, rollno=None, subject_code=None):
             elif marks >= 50: return "B"
             else: return "Others"
 
+        # Pre-fetch all answer sheets for this student and subject
+        # This ensures we find all the question texts and answer texts
+        all_answer_sheets = list(answer_sheet_collection.find({
+            "subjects": {
+                "$elemMatch": {
+                    "subject_code": subject_code,
+                    "students": {
+                        "$elemMatch": {
+                            "student_id": rollno
+                        }
+                    }
+                }
+            }
+        }))
+        
+        # Create a master mapping of all extracted answers for this student
+        master_extracted_answers_map = {}
+        for sheet in all_answer_sheets:
+            for subj in sheet.get("subjects", []):
+                if subj.get("subject_code") == subject_code:
+                    for student in subj.get("students", []):
+                        if student.get("student_id") == rollno:
+                            for ans in student.get("extracted_answers", []):
+                                qno = str(ans.get("question_no")).strip()
+                                if qno:
+                                    master_extracted_answers_map[qno] = {
+                                        "answer_text": ans.get("answer_text", ""),
+                                        "question_text": ans.get("question_text", ""),
+                                        "bloom_level": ans.get("bloom_level", ""),
+                                        "co": ans.get("co", ""),
+                                        "max_marks": ans.get("max_marks", 0)
+                                    }
+
+        # Pre-fetch all question mappings for this subject
+        all_mappings = list(exam_mapped_questions_collection.find({
+            "subject_code": subject_code
+        }))
+        
+        # Create a master mapping of all question mappings
+        master_question_mappings = {}
+        for mapping in all_mappings:
+            for q in mapping.get("questions", []):
+                qno = str(q.get("question_no")).strip()
+                if qno:
+                    master_question_mappings[qno] = {
+                        "question_text": q.get("question_text", ""),
+                        "expected_answer": q.get("answer_text", ""),
+                        "max_marks": q.get("marks", 0),
+                        "bloom_level": q.get("bloom_level", ""),
+                        "co": q.get("CO", "")
+                    }
+
+        from bson import ObjectId
+
         for result in result_docs:
             exam_type = result.get("exam_type", "Unknown")
+            exam_id_obj = result.get("_id")
+            exam_id_str = str(exam_id_obj)
+
+            # Get exam-specific answer sheets and mappings
+            extracted_answers_map = {}
+            question_mappings = {}
+            
+            # Fetch answer sheets for this specific exam
+            answer_sheets_for_exam = list(answer_sheet_collection.find({
+                "$or": [
+                    {"exam_id": exam_id_obj},
+                    {"exam_id": exam_id_str}
+                ]
+            }))
+            
+            for sheet in answer_sheets_for_exam:
+                if "subjects" in sheet:
+                    for subj in sheet.get("subjects", []):
+                        if subj.get("subject_code") == subject_code:
+                            for student in subj.get("students", []):
+                                if student.get("student_id") == rollno:
+                                    for ans in student.get("extracted_answers", []):
+                                        qno = str(ans.get("question_no")).strip()
+                                        extracted_answers_map[qno] = {
+                                            "answer_text": ans.get("answer_text", ""),
+                                            "question_text": ans.get("question_text", ""),
+                                            "bloom_level": ans.get("bloom_level", ""),
+                                            "co": ans.get("co", ""),
+                                            "max_marks": ans.get("max_marks", 0)
+                                        }
+                elif "extracted_answers" in sheet:
+                    for ans in sheet.get("extracted_answers", []):
+                        qno = str(ans.get("question_no")).strip()
+                        extracted_answers_map[qno] = {
+                            "answer_text": ans.get("answer_text", ""),
+                            "question_text": ans.get("question_text", ""),
+                            "bloom_level": ans.get("bloom_level", ""),
+                            "co": ans.get("co", ""),
+                            "max_marks": ans.get("max_marks", 0)
+                        }
+            
+            # Fetch question mappings for this specific exam
+            mapped_docs = list(exam_mapped_questions_collection.find({
+                "$or": [
+                    {"exam_id": exam_id_obj},
+                    {"exam_id": exam_id_str}
+                ]
+            }))
+            
+            for mapped_doc in mapped_docs:
+                if "questions" in mapped_doc:
+                    for q in mapped_doc["questions"]:
+                        qno = str(q.get("question_no")).strip()
+                        question_mappings[qno] = {
+                            "question_text": q.get("question_text", ""),
+                            "expected_answer": q.get("answer_text", ""),
+                            "max_marks": q.get("marks", 0),
+                            "bloom_level": q.get("bloom_level", ""),
+                            "co": q.get("CO", "")
+                        }
+
+            # 3. Process each student
             for subject in result.get("results", {}).get("subjects", []):
                 if subject.get("subject_code") != subject_code:
                     continue
@@ -633,19 +777,96 @@ def get_student_semester_report(request, rollno=None, subject_code=None):
                     if student.get("register_number") != rollno:
                         continue
 
-                    answers = []
-                    for ans in student.get("evaluated_answers", []):
-                        bloom = ans.get("bloom_level")
-                        co = ans.get("co")
+                    answers = student.get("evaluated_answers", [])
+                    bloom_map = {}
+                    co_map = {}
+                    correct_count = 0
+                    enriched_answers = []
+
+                    for ans in answers:
+                        qno_raw = ans.get("question_no")
+                        qno = str(qno_raw).strip() if qno_raw else ""
+
+                        # Try to find in exam-specific mappings first
+                        q_mapping = question_mappings.get(qno, {})
+                        extracted = extracted_answers_map.get(qno, {})
+                        
+                        # If not found, try master mappings (from all exams)
+                        if not q_mapping:
+                            q_mapping = master_question_mappings.get(qno, {})
+                        if not extracted:
+                            extracted = master_extracted_answers_map.get(qno, {})
+                        
+                        # Try variations of the question number if still not found
+                        if (not q_mapping or not extracted) and qno:
+                            # Try with/without trailing parentheses
+                            variations = [qno]
+                            if qno.endswith(')'):
+                                variations.append(qno[:-1])
+                            else:
+                                variations.append(f"{qno})")
+                                
+                            # Try with different formats (1a vs 1a) etc)
+                            if re.match(r'^\d+[a-z]$', qno, re.IGNORECASE):
+                                variations.append(f"{qno[:-1]}{qno[-1]})")
+                            
+                            # Check each variation in both mappings
+                            for var in variations:
+                                if not q_mapping and var in question_mappings:
+                                    q_mapping = question_mappings[var]
+                                if not q_mapping and var in master_question_mappings:
+                                    q_mapping = master_question_mappings[var]
+                                if not extracted and var in extracted_answers_map:
+                                    extracted = extracted_answers_map[var]
+                                if not extracted and var in master_extracted_answers_map:
+                                    extracted = master_extracted_answers_map[var]
+
+                        bloom = ans.get("bloom_level") or extracted.get("bloom_level") or q_mapping.get("bloom_level")
+                        co = ans.get("co") or extracted.get("co") or q_mapping.get("co")
+                        
                         if bloom:
                             bloom_counter[bloom] = bloom_counter.get(bloom, 0) + 1
+                            bloom_map[bloom] = bloom_map.get(bloom, 0) + 1
                         if co:
                             co_counter[co] = co_counter.get(co, 0) + 1
-                        answers.append(ans)
+                            co_map[co] = co_map.get(co, 0) + 1
+                        if ans.get("marks_awarded", 0) > 0:
+                            correct_count += 1
+
+                        # Build enriched answer data including all fields
+                        enriched_answer = ans.copy()  # Start with the existing answer
+                        
+                        # Prioritize sources for question_text
+                        question_text = (
+                            q_mapping.get("question_text") or 
+                            extracted.get("question_text") or 
+                            ans.get("question_text") or 
+                            ""
+                        )
+                        
+                        # Prioritize sources for answer_text
+                        answer_text = (
+                            extracted.get("answer_text") or 
+                            ans.get("answer_text") or 
+                            ""
+                        )
+                        
+                        # Set these fields with prioritized values
+                        enriched_answer["question_text"] = question_text
+                        enriched_answer["answer_text"] = answer_text
+                        enriched_answer["expected_answer"] = q_mapping.get("expected_answer", "")
+                        enriched_answer["max_marks"] = q_mapping.get("max_marks", 0) or extracted.get("max_marks", 0) or ans.get("max_marks", 0)
+                        
+                        # Set bloom/CO if not already present
+                        if bloom and not enriched_answer.get("bloom_level"):
+                            enriched_answer["bloom_level"] = bloom
+                        if co and not enriched_answer.get("co"):
+                            enriched_answer["co"] = co
+                            
+                        enriched_answers.append(enriched_answer)
 
                     ai_mark = student.get("total_marks", 0)
                     staff_mark = student.get("staff_mark", 0)
-
                     max_mark = 50 if "IAE" in exam_type.upper() else 100
                     ai_scores.append(ai_mark)
                     staff_scores.append(staff_mark)
@@ -660,10 +881,8 @@ def get_student_semester_report(request, rollno=None, subject_code=None):
                     else:
                         fail_count += 1
 
-                    if exam_type not in total_marks_by_exam_type:
-                        total_marks_by_exam_type[exam_type] = 0
-                        total_count_by_exam_type[exam_type] = 0
-
+                    total_marks_by_exam_type.setdefault(exam_type, 0)
+                    total_count_by_exam_type.setdefault(exam_type, 0)
                     total_marks_by_exam_type[exam_type] += ai_mark
                     total_count_by_exam_type[exam_type] += 1
 
@@ -672,23 +891,51 @@ def get_student_semester_report(request, rollno=None, subject_code=None):
                         "total_marks": ai_mark,
                         "staff_mark": staff_mark,
                         "questions_answered": len(answers),
-                        "answers": answers
+                        "answers": enriched_answers
                     })
 
-        # Fetch subject_name from results collection
+                    if "IAE" in exam_type:
+                        progress = 0.0
+                        if previous_iae_mark is not None:
+                            diff = ai_mark - previous_iae_mark
+                            progress = round((diff / previous_iae_mark) * 100, 2) if previous_iae_mark != 0 else 0.0
+                        iae_stats[exam_type] = {
+                            "total_mark": ai_mark,
+                            "bloom_performance": bloom_map,
+                            "progress": progress,
+                            "performance_graph": [
+                                {
+                                    "question_no": ans.get("question_no"),
+                                    "marks": ans.get("marks_awarded", 0)
+                                } for ans in answers
+                            ]
+                        }
+                        previous_iae_mark = ai_mark
+
+                    elif exam_type == "Semester":
+                        semester_stats = {
+                            "pass": "Yes" if ai_mark >= 50 else "No",
+                            "mark": ai_mark,
+                            "correct_answers": correct_count,
+                            "bloom_performance": bloom_map,
+                            "co_distribution": co_map,
+                            "grade_distribution": grade_distribution.copy(),
+                            "ai_vs_manual_discrepancy": {
+                                "ai": round(ai_mark, 2),
+                                "manual": round(staff_mark, 2)
+                            }
+                        }
+
         subject_name = ""
-        sample_result = results_collection.find_one({
-            "results.subjects.subject_code": subject_code,
-            "results.subjects.students.register_number": rollno
-        })
+        sample_result = results_collection.find_one(query)
         if sample_result:
             for subj in sample_result.get("results", {}).get("subjects", []):
                 if subj.get("subject_code") == subject_code:
                     subject_name = subj.get("subject_name", "")
                     break
 
-        ai_avg = round(sum(ai_scores) / 4, 2) if ai_scores else 0
-        staff_avg = round(sum(staff_scores) / 4, 2) if staff_scores else 0
+        ai_avg = round(sum(ai_scores) / len(ai_scores), 2) if ai_scores else 0
+        staff_avg = round(sum(staff_scores) / len(staff_scores), 2) if staff_scores else 0
 
         overall = {
             "iae_vs_semester": { 
@@ -714,8 +961,13 @@ def get_student_semester_report(request, rollno=None, subject_code=None):
             "subject_code": subject_code,
             "subject_name": subject_name or subject_code,
             "overall": overall,
+            "iae_stats": iae_stats,
+            "semester_stats": semester_stats,
             "exam_results": exam_results
         }, status=200)
 
     except Exception as e:
+        import traceback
+        print(f"Error in get_student_semester_report: {str(e)}")
+        print(traceback.format_exc())
         return JsonResponse({"error": str(e)}, status=500)

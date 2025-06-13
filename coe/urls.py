@@ -5,6 +5,7 @@ from .subadmin import *
 from .superadmin import *
 from .Search import *
 from .students import *
+from .department import *
 
 urlpatterns = [
     # Authentication
@@ -79,6 +80,7 @@ urlpatterns = [
     path('get-iae-details-by-ids/', get_iae_details_by_ids, name='get_iae_details_by_ids'),  
     path('exam-analysis/', exam_analysis, name='exam_analysis'),
     path('student-analysis/', student_analysis, name='student_analysis'),
+    path('get-exam-questions/<str:exam_id>/<str:subject_code>/', get_exam_questions, name='get_exam_questions'),
     
     #rubric management
     path('update-subject-rubrics/', update_subject_rubrics, name='update_subject_rubrics'),
@@ -107,8 +109,11 @@ urlpatterns = [
     path('edit-department/<str:dept_id>/', edit_department, name='edit_department'),
     path('delete-department/<str:dept_id>/', delete_department, name='delete_department'),
     path('assign-subject-to-department/', assign_subject_to_department, name='assign_subject_to_department'),
+    path('bulk-upload-subjects/', bulk_upload_subjects, name='bulk_upload_subjects'),
     path('get-departments/', get_departments_by_college, name='get_departments_by_college'),
     path('get-department/<str:dept_id>/', get_department_by_id, name='get_department_by_id'),
+    path('get-department-student/<str:dept_id>/', get_department_student, name='get_department_student'),
+    path('get-unique-batches/', get_unique_batches, name='get_unique_batches'),
     path('edit-subject/', edit_subject, name='edit_subject'),
     path('delete-subject/', delete_subject, name='delete_subject'),
 

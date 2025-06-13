@@ -592,7 +592,49 @@ def get_subject_by_id(request, exam_id, subject_code):
 
     except Exception as e:
         return JsonResponse({'error': str(e)}, status=500)
+@csrf_exempt
+def get_exam_questions(request, exam_id, subject_code):
+    """
+    Get mapped questions for a specific exam subject.
+    Used to check if questions exist before starting validation.
+    """
+    if request.method != "GET":
+        return JsonResponse({"error": "Invalid request method"}, status=405)
     
+    try:
+        # Find mapped questions for this exam/subject
+        exam_mapped_doc = exam_mapped_questions_collection.find_one({
+            "$or": [
+                {"exam_id": exam_id, "subject_code": subject_code},
+                {"exam_id": str(exam_id), "subject_code": subject_code}
+            ]
+        })
+        
+        if not exam_mapped_doc:
+            return JsonResponse({"error": "No mapped questions found"}, status=404)
+        
+        questions = exam_mapped_doc.get("questions", [])
+        if not questions:
+            return JsonResponse({"error": "Questions array is empty"}, status=404)
+        
+        # Return a simplified version of the questions for quick checking
+        simplified_questions = []
+        for q in questions:
+            simplified_questions.append({
+                "question_no": q.get("question_no"),
+                "marks": q.get("marks", 0),
+                "bloom_level": q.get("bloom_level", "")
+            })
+            
+        return JsonResponse({
+            "exam_id": exam_id,
+            "subject_code": subject_code,
+            "question_count": len(questions),
+            "questions": simplified_questions
+        }, status=200)
+        
+    except Exception as e:
+        return JsonResponse({"error": str(e)}, status=500)    
 def process_answer_sheet_with_ai(pdf_path, exam_id, student_id):
     """
     Process a student's answer sheet PDF using Gemini AI with advanced filtering
@@ -2882,19 +2924,10 @@ def get_exam_results(request, exam_id):
 
 @csrf_exempt
 def get_exam_details_report(request):
-    """
-    Fetches exam details and results for a student from the exam_details and results collections.
-    Expects a POST request with a JSON body containing:
-    - register_number: The student's register number (string).
-    Returns:
-    - A combined list of exam details and results with exam_id, exam_type, examDate, session, subject_code, subject_name, total_marks, and more.
-    - Statistics including internals average, semester CGPA, semester average, and number of arrears.
-    """
     if request.method != "POST":
         return JsonResponse({"error": "Invalid request method"}, status=405)
 
     try:
-        # Parse JSON body
         if request.content_type and "application/json" in request.content_type:
             try:
                 data = json.loads(request.body)
@@ -2903,16 +2936,10 @@ def get_exam_details_report(request):
         else:
             return JsonResponse({"error": "Content-Type must be application/json"}, status=400)
 
-        # Extract register_number from the request body
         register_number = data.get("register_number", "").strip()
         if not register_number:
             return JsonResponse({"error": "No register_number provided"}, status=400)
 
-        # Debug: Log all register numbers in the student_collection
-        all_students = student_collection.find({}, {"register_number": 1})
-        register_numbers = [student.get("register_number", "") for student in all_students]
-
-        # Case-insensitive search for register_number in student_collection
         student_doc = student_collection.find_one({
             "register_number": {"$regex": f"^{re.escape(register_number)}$", "$options": "i"}
         })
@@ -2928,17 +2955,6 @@ def get_exam_details_report(request):
             "register_number": student_doc.get("register_number", "")
         }
 
-        # Debug: Log all register numbers in the results_collection
-        all_results = results_collection.find({}, {"results.subjects.students.register_number": 1})
-        result_register_numbers = []
-        for doc in all_results:
-            for subject in doc.get("results", {}).get("subjects", []):
-                for student in subject.get("students", []):
-                    reg_num = student.get("register_number", "")
-                    if reg_num:
-                        result_register_numbers.append(reg_num)
-
-        # Fetch results for the student from the results_collection (case-insensitive)
         matched_result_docs = results_collection.find({
             "results.subjects.students.register_number": {
                 "$regex": f"^{re.escape(register_number)}$",
@@ -2946,7 +2962,6 @@ def get_exam_details_report(request):
             }
         })
 
-        # Extract results and collect exam_ids
         results_list = []
         exam_ids = set()
         for doc in matched_result_docs:
@@ -2958,134 +2973,103 @@ def get_exam_details_report(request):
 
             for subject in subjects:
                 for student in subject.get("students", []):
-                    student_reg_num = student.get("register_number", "").strip()
-                    if re.match(f"^{re.escape(register_number)}$", student_reg_num, re.IGNORECASE):
-                        created_at_value = student.get("created_at")
-                        if isinstance(created_at_value, datetime):
-                            created_at_iso = created_at_value.isoformat()
-                        elif isinstance(created_at_value, str):
-                            created_at_iso = created_at_value
-                        else:
-                            created_at_iso = None
+                    if student.get("register_number", "").strip().lower() != register_number.lower():
+                        continue
 
-                        result_entry = {
-                            "exam_id": exam_id,
-                            "name": student.get("name", ""),
-                            "evaluated_answers": student.get("evaluated_answers", []),
-                            "total_marks": student.get("total_marks", 0),
-                            "created_at": created_at_iso,
-                            "answer_sheet_id": student.get("answer_sheet_id", ""),
-                            "answer_sheet_file_url": student.get("answer_sheet_file_url", ""),
-                            "subject_code": subject.get("subject_code", ""),
-                            "subject_name": subject.get("subject_name", ""),
-                            "register_number": student.get("register_number", "")
-                        }
-                        results_list.append(result_entry)
+                    created_at_value = student.get("created_at")
+                    created_at_iso = created_at_value.isoformat() if isinstance(created_at_value, datetime) else str(created_at_value)
 
-        if not results_list:
-            return JsonResponse({
-                "student": student_info,
-                "exam_results": [],
-                "stats": {
-                    "internals_average": 0,
-                    "semester_cgpa": 0,
-                    "semester_average": 0,
-                    "number_of_arrears": 0
-                }
-            }, status=200)
+                    results_list.append({
+                        "exam_id": exam_id,
+                        "exam_type": doc.get("exam_type", ""),
+                        "subject_code": subject.get("subject_code", ""),
+                        "subject_name": subject.get("subject_name", ""),
+                        "total_marks": student.get("total_marks", 0),
+                        "answer_sheet_id": student.get("answer_sheet_id", ""),
+                        "answer_sheet_file_url": student.get("answer_sheet_file_url", ""),
+                        "created_at": created_at_iso,
+                        "status": "Passed" if student.get("total_marks", 0) >= 50 else "Failed"
+                    })
 
-        # Fetch exam details from the exam_collection using the exam_ids
         exam_details = []
         for exam_id in exam_ids:
             try:
                 exam = exam_collection.find_one({"_id": ObjectId(exam_id)})
                 if not exam:
                     continue
-
-                subject_with_date = next(
-                    (sub for sub in exam.get("subjects", []) if sub.get("examDate") and sub.get("session")),
-                    None
-                )
-
-                exam_data = {
+                subject_with_date = next((sub for sub in exam.get("subjects", []) if sub.get("examDate") and sub.get("session")), None)
+                exam_details.append({
                     "exam_id": exam_id,
                     "exam_type": exam.get("exam_type", ""),
                     "semester": exam.get("semester", ""),
                     "examDate": subject_with_date.get("examDate", "") if subject_with_date else "",
-                    "session": subject_with_date.get("session", "") if subject_with_date else "",
-                }      
-                exam_details.append(exam_data)
-            except Exception as e:
+                    "session": subject_with_date.get("session", "") if subject_with_date else ""
+                })
+            except:
                 continue
 
-        # Combine exam details with results
-        combined_results = []
+        # Combine details and group by (subject_code, semester)
+        subject_map = {}
         for result in results_list:
-            exam = next((e for e in exam_details if e["exam_id"] == result["exam_id"]), None)
-            if not exam:
-                continue
+            exam = next((e for e in exam_details if e["exam_id"] == result["exam_id"]), {})
+            semester = exam.get("semester", "")
+            subject_key = (result["subject_code"], semester)
 
-            # Determine pass/fail status based on total_marks (fail if < 50)
-            status = "Passed" if result["total_marks"] >= 50 else "Failed"
-
-            combined_entry = {
+            exam_entry = {
                 "exam_id": result["exam_id"],
-                "exam_type": exam["exam_type"],
-                "semester": exam.get("semester", ""),
-                "examDate": exam["examDate"],
-                "session": exam["session"],
-                "subject_code": result["subject_code"],  # Use subject_code from results_list
-                "subject_name": result["subject_name"],  # Use subject_name from results_list
+                "exam_type": exam.get("exam_type", result.get("exam_type", "")),
+                "semester": semester,
+                "examDate": exam.get("examDate", ""),
+                "session": exam.get("session", ""),
+                "subject_code": result["subject_code"],
+                "subject_name": result["subject_name"],
                 "attendance_status": "Completed",
                 "total_marks": result["total_marks"],
                 "answer_sheet_id": result["answer_sheet_id"],
                 "answer_sheet_file_url": result["answer_sheet_file_url"],
                 "created_at": result["created_at"],
-                "status": status
+                "status": result["status"]
             }
-            combined_results.append(combined_entry)
 
-        # Calculate statistics
-        internals = [r["total_marks"] for r in combined_results if r["exam_type"] in ["IAE - 1", "IAE - 2", "IAE - 3"]]
-        semester_exams = [r["total_marks"] for r in combined_results if r["exam_type"] == "Semester"]
-        failed_exams = [r for r in combined_results if r["status"] == "Failed" and r["exam_type"] == "Semester"]
+            if subject_key not in subject_map:
+                subject_map[subject_key] = {
+                    "subject_code": result["subject_code"],
+                    "subject_name": result["subject_name"],
+                    "semester": semester,
+                    "exams": []
+                }
+            subject_map[subject_key]["exams"].append(exam_entry)
 
-        # Internals Average
+        grouped_exam_results = list(subject_map.values())
+
+        internals = [r["total_marks"] for sub in grouped_exam_results for r in sub["exams"] if r["exam_type"] in ["IAE - 1", "IAE - 2", "IAE - 3"]]
+        semester_exams = [r["total_marks"] for sub in grouped_exam_results for r in sub["exams"] if r["exam_type"] == "Semester"]
+        failed_exams = [r for sub in grouped_exam_results for r in sub["exams"] if r["status"] == "Failed" and r["exam_type"] == "Semester"]
+
         internals_average = sum(internals) / len(internals) if internals else 0
-
-        # Semester Average
         semester_average = sum(semester_exams) / len(semester_exams) if semester_exams else 0
 
-        # Semester CGPA (Simplified mapping: marks to grade points)
         def marks_to_grade_points(marks):
-            if marks >= 90:
-                return 10  # A+
-            elif marks >= 80:
-                return 9   # A
-            elif marks >= 70:
-                return 8   # B+
-            elif marks >= 60:
-                return 7   # B
-            elif marks >= 50:
-                return 6   # C
-            return 0       # F
+            if marks >= 90: return 10
+            elif marks >= 80: return 9
+            elif marks >= 70: return 8
+            elif marks >= 60: return 7
+            elif marks >= 50: return 6
+            return 0
 
         semester_grade_points = [marks_to_grade_points(marks) for marks in semester_exams]
         semester_cgpa = sum(semester_grade_points) / len(semester_grade_points) if semester_grade_points else 0
-
-        # Number of Arrears
-        number_of_arrears = len(failed_exams)
 
         stats = {
             "internals_average": round(internals_average, 2),
             "semester_cgpa": round(semester_cgpa, 2),
             "semester_average": round(semester_average, 2),
-            "number_of_arrears": number_of_arrears
+            "number_of_arrears": len(failed_exams)
         }
 
         return JsonResponse({
             "student": student_info,
-            "exam_results": combined_results,
+            "exam_results": grouped_exam_results,
             "stats": stats
         }, status=200)
 
@@ -3763,44 +3747,60 @@ def process_and_evaluate_answer_sheet(request):
         if not all([exam_id, register_number, subject_code]):
             return JsonResponse({"error": "Missing required fields"}, status=400)
         
+        # Debug logging to track execution flow
+        print(f"Processing answer sheet for student {register_number}, subject {subject_code}")
+        
+        # IMPORTANT: Check for mapped questions early to avoid unnecessary processing
+        exam_mapped_doc = exam_mapped_questions_collection.find_one({
+            "$or": [
+                {"exam_id": exam_id, "subject_code": subject_code},
+                {"exam_id": str(exam_id), "subject_code": subject_code}
+            ]
+        })
+        
+        if not exam_mapped_doc:
+            print(f"No mapped questions found for exam_id: {exam_id}, subject_code: {subject_code}")
+            return JsonResponse({
+                "error": "No exam questions found for evaluation. Please upload question paper and answer key first.",
+                "missing_questions": True
+            }, status=400)
+        
+        mapped_questions = exam_mapped_doc.get("questions", [])
+        if not mapped_questions:
+            print(f"Empty questions array for exam_id: {exam_id}, subject_code: {subject_code}")
+            return JsonResponse({
+                "error": "No questions found in the mapped data. Please check the question paper and answer key.",
+                "missing_questions": True
+            }, status=400)
+        
+        print(f"Found {len(mapped_questions)} mapped questions for evaluation")
+        
         # Fetch exam details to get exam_type
         exam_doc = exam_collection.find_one({"_id": ObjectId(exam_id)})
         if not exam_doc:
             return JsonResponse({"error": "Exam not found in exam_collection"}, status=404)
         exam_type = exam_doc.get("exam_type", "")
 
-        # Try to find answer sheet by ID
+        # Try to find answer sheet by ID first, then by exam+student+subject
         if answer_sheet_id:
             answer_sheet = answer_sheet_collection.find_one({"_id": ObjectId(answer_sheet_id)})
             if not answer_sheet:
                 return JsonResponse({"error": f"Answer sheet not found with ID: {answer_sheet_id}"}, status=404)
         else:
+            # Search using multiple possible document structures
             answer_sheet = answer_sheet_collection.find_one({
-                "exam_id": exam_id,
-                "student_id": register_number,
-                "subject_code": subject_code
+                "$or": [
+                    {"exam_id": exam_id, "student_id": register_number, "subject_code": subject_code},
+                    {"exam_id": exam_id, "subjects.subject_code": subject_code, "subjects.students.student_id": register_number}
+                ]
             })
             
             if not answer_sheet:
-                answer_sheet = answer_sheet_collection.find_one({
-                    "exam_id": exam_id,
-                    "subjects": {
-                        "$elemMatch": {
-                            "subject_code": subject_code,
-                            "students": {
-                                "$elemMatch": {
-                                    "student_id": register_number
-                                }
-                            }
-                        }
-                    }
-                })
-            
-            if not answer_sheet:
-                return JsonResponse({"error": "Answer sheet not found"}, status=404)
+                return JsonResponse({"error": f"Answer sheet not found for student {register_number} in subject {subject_code}"}, status=404)
             
             answer_sheet_id = str(answer_sheet["_id"])
         
+        # Locate the file_url in the document (handle both flat and nested structures)
         file_url = None
         if "file_url" in answer_sheet:
             file_url = answer_sheet.get("file_url")
@@ -3817,89 +3817,46 @@ def process_and_evaluate_answer_sheet(request):
         if not file_url:
             return JsonResponse({"error": "No file URL found for this answer sheet"}, status=404)
         
+        print(f"Found answer sheet with file_url: {file_url}")
         
+        # Download the PDF file from S3
         temp_dir = tempfile.gettempdir()
         temp_pdf_path = os.path.join(temp_dir, f"{register_number}_{exam_id}_temp.pdf")
         
         try:
             s3_key = file_url.replace(f"{AWS_S3_CUSTOM_DOMAIN}/", "")
+            print(f"Downloading from S3: {s3_key} to {temp_pdf_path}")
             s3_client.download_file(
                 AWS_STORAGE_BUCKET_NAME, 
                 s3_key, 
                 temp_pdf_path
             )
+            print(f"PDF successfully downloaded to {temp_pdf_path}")
         except Exception as s3_error:
             return JsonResponse({"error": f"Failed to download PDF from S3: {str(s3_error)}"}, status=500)
         
+        # STEP 1: Extract answers from PDF
+        print("Starting extraction process...")
         extracted_data = process_answer_sheet_with_ai(temp_pdf_path, exam_id, register_number)
         
         if not extracted_data or not extracted_data.get("answers"):
             return JsonResponse({"error": "Failed to extract answers from the PDF"}, status=400)
         
         answers = extracted_data.get("answers", [])
+        print(f"Successfully extracted {len(answers)} answers from PDF")
         
-        # Fetch mapped questions for enriching the extracted answers
-        try:
-            exam_mapped_doc = exam_mapped_questions_collection.find_one({
-                "$or": [
-                    {"exam_id": exam_id, "subject_code": subject_code},
-                    {"exam_id": str(exam_id), "subject_code": subject_code}
-                ]
-            })
-            
-            # Create a dictionary for quick lookup of question information
-            mapped_questions = {}
-            if exam_mapped_doc and "questions" in exam_mapped_doc:
-                for q in exam_mapped_doc.get("questions", []):
-                    q_no = q.get("question_no", "").strip()
-                    if q_no:
-                        mapped_questions[q_no] = {
-                            "question_text": q.get("question_text", ""),
-                            "max_marks": q.get("marks", 0),
-                            "bloom_level": q.get("bloom_level", ""),
-                            "co": q.get("CO", ""),
-                        }
-            
-            # Enrich extracted answers with question information
-            enriched_answers = []
-            for answer in answers:
-                q_no = answer.get("question_no", "").strip()
-                enriched_answer = answer.copy()
-                
-                # Try exact match
-                if q_no in mapped_questions:
-                    question_info = mapped_questions[q_no]
-                    enriched_answer["question_text"] = question_info["question_text"]
-                    enriched_answer["max_marks"] = question_info["max_marks"]
-                    enriched_answer["bloom_level"] = question_info["bloom_level"]
-                    enriched_answer["co"] = question_info["co"]
-                # Try matching without parentheses
-                elif q_no.replace(")", "") in mapped_questions:
-                    question_info = mapped_questions[q_no.replace(")", "")]
-                    enriched_answer["question_text"] = question_info["question_text"]
-                    enriched_answer["max_marks"] = question_info["max_marks"]
-                    enriched_answer["bloom_level"] = question_info["bloom_level"]
-                    enriched_answer["co"] = question_info["co"]
-                
-                enriched_answers.append(enriched_answer)
-            
-            # Replace original answers with enriched answers
-            answers = enriched_answers
-            
-        except Exception as e:
-            print(f"Warning: Could not enrich answers with question data: {str(e)}")
-            # Continue with original answers if enrichment fails
-        
+        # Update answer sheet with extracted answers
         if "student_id" in answer_sheet:
             answer_sheet_collection.update_one(
                 {"_id": ObjectId(answer_sheet_id)},
                 {"$set": {
                     "extracted_answers": answers,
-                    "processing_status": "completed",
+                    "processing_status": "extraction_complete",
                     "processed_at": datetime.now()
                 }}
             )
         else:
+            # Handle nested document structure
             for subject_idx, subject in enumerate(answer_sheet.get("subjects", [])):
                 if subject.get("subject_code") == subject_code:
                     for student_idx, student in enumerate(subject.get("students", [])):
@@ -3908,39 +3865,32 @@ def process_and_evaluate_answer_sheet(request):
                                 {"_id": ObjectId(answer_sheet_id)},
                                 {"$set": {
                                     f"subjects.{subject_idx}.students.{student_idx}.extracted_answers": answers,
-                                    f"subjects.{subject_idx}.students.{student_idx}.processing_status": "completed",
+                                    f"subjects.{subject_idx}.students.{student_idx}.processing_status": "extraction_complete",
                                     f"subjects.{subject_idx}.students.{student_idx}.processed_at": datetime.now()
                                 }}
                             )
                             break
                     break
         
+        # STEP 2: Evaluate the extracted answers
+        print("Starting evaluation process...")
         try:
-            try:
-                exam_mapped_doc = exam_mapped_questions_collection.find_one({"exam_id": exam_id})
-                if not exam_mapped_doc:
-                    exam_mapped_doc = exam_mapped_questions_collection.find_one({"exam_id": str(exam_id)})
-            except:
-                exam_mapped_doc = exam_mapped_questions_collection.find_one({
-                    "$or": [
-                        {"exam_id": exam_id},
-                        {"exam_id": str(exam_id)}
-                    ]
-                })
-                
-            if not exam_mapped_doc:
-                return JsonResponse({
-                    "message": "Answer sheet processed successfully but exam questions not found for evaluation",
-                    "extracted_answers": len(answers)
-                }, status=200)
+            # Get student info
+            student = student_collection.find_one({
+                "$or": [
+                    {"register_number": register_number},
+                    {"roll_number": register_number}
+                ]
+            })
             
-            student = student_collection.find_one({"register_number": register_number})
             if not student:
+                print(f"Student with register number {register_number} not found")
                 return JsonResponse({
-                    "message": "Answer sheet processed successfully but student not found for evaluation",
+                    "error": "Student not found for evaluation",
                     "extracted_answers": len(answers)
-                }, status=200)
+                }, status=400)
             
+            # Get subject name
             subject_name = ""
             if "subject_name" in answer_sheet:
                 subject_name = answer_sheet.get("subject_name", "")
@@ -3951,19 +3901,17 @@ def process_and_evaluate_answer_sheet(request):
                         break
             
             if not subject_name:
-                exam_detail = exam_collection.find_one({"_id": ObjectId(exam_id)})
-                if exam_detail and "subjects" in exam_detail:
-                    for subject in exam_detail.get("subjects", []):
-                        if subject.get("subject_code") == subject_code:
-                            subject_name = subject.get("subject_name", "")
-                            break
+                for subject in exam_doc.get("subjects", []):
+                    if subject.get("subject_code") == subject_code:
+                        subject_name = subject.get("subject_name", "")
+                        break
             
+            # Map of extracted answers for quick lookup
+            answer_map = {ans.get("question_no"): ans for ans in answers}
+            
+            # Process each mapped question
             evaluated_answers = []
             total_marks = 0
-            mapped_questions = exam_mapped_doc.get("questions", [])
-            
-            print(f"Found {len(mapped_questions)} mapped questions for evaluation")
-            print(f"Student answers extracted: {len(answers)}")
             
             for q in mapped_questions:
                 q_no = q.get("question_no")
@@ -3971,52 +3919,69 @@ def process_and_evaluate_answer_sheet(request):
                 keywords = q.get("keywords", [])
                 max_marks = q.get("marks", 0)
                 bloom_level = q.get("bloom_level", "")
-                co = q.get("CO", "")  # Fetch the CO for this question
+                co = q.get("CO", "")
                 
+                print(f"Evaluating question {q_no}")
+                
+                # Get rubric for this mark
                 rubric_doc = rubrics_collection.find_one({"mark_category": str(max_marks)})
-                print(f"Rubric document for max marks {max_marks}: {rubric_doc}")
-
-                def get_rubric_items_for_bloom_level(rubric_doc, bloom_level):
+                
+                def get_rubric_items(rubric_doc, bloom_level):
                     if not rubric_doc:
                         return []
                     for criterion in rubric_doc.get("criteria", []):
-                        if criterion.get("bloom_level", "").lower() == bloom_level.lower() or \
-                           criterion.get("Short_Name", "").lower() == bloom_level.lower():
+                        if criterion.get("bloom_level", "").lower() == bloom_level.lower() or criterion.get("Short_Name", "").lower() == bloom_level.lower():
                             return criterion.get("items", [])
                     return []
-
-                rubric_items = get_rubric_items_for_bloom_level(rubric_doc, bloom_level)
-                print(f"Rubric items for Bloom's level {bloom_level}: {rubric_items}")
-
-                print(f"The data is: {rubric_items}")
-
+                
+                rubric_items = get_rubric_items(rubric_doc, bloom_level)
+                
+                # Find matching student answer
                 student_answer_obj = None
-                for ans in answers:
-                    if ans.get("question_no") == q_no or ans.get("question_no") == q_no.replace(')', ''):
-                        student_answer_obj = ans
+                for key in [q_no, q_no.replace(')', ''), q_no + ')']:
+                    if key in answer_map:
+                        student_answer_obj = answer_map[key]
                         break
-
+                
                 if student_answer_obj:
                     student_answer = student_answer_obj.get("answer_text", "")
-                    print(f"Student answer for question {q_no}: {student_answer}")
-
-                    if max_marks >= 13:
-                        try:
-                            marks_awarded, justification, feedback, reduction_reasons, ai_recommendation, rubrick_guidelines, rubrick_marks = call_gemini_api(
-                                student_answer, expected_answer, keywords, max_marks, rubric_items 
-                            )
-                            method_used = "gemini"
-                        except Exception as e:
+                    print(f"Found student answer for question {q_no}, length: {len(student_answer)}")
+                    
+                    try:
+                        # Choose evaluation method based on marks
+                        if max_marks >= 13:
+                            try:
+                                print(f"Using Gemini API for evaluation: question {q_no}")
+                                marks_awarded, justification, feedback, reduction_reasons, ai_recommendation, rubrick_guidelines, rubrick_marks = call_gemini_api(
+                                    student_answer, expected_answer, keywords, max_marks, rubric_items
+                                )
+                                method_used = "gemini"
+                            except Exception as eval_error:
+                                print(f"Gemini API failed, using fallback: {str(eval_error)}")
+                                marks_awarded, justification, feedback, reduction_reasons, ai_recommendation, rubrick_guidelines, rubrick_marks = keyword_based_scoring(
+                                    student_answer, keywords, max_marks, rubric_items
+                                )
+                                method_used = "gemini_fallback"
+                        else:
+                            print(f"Using keyword scoring for evaluation: question {q_no}")
                             marks_awarded, justification, feedback, reduction_reasons, ai_recommendation, rubrick_guidelines, rubrick_marks = keyword_based_scoring(
                                 student_answer, keywords, max_marks, rubric_items
                             )
-                            method_used = "gemini_fallback"
-                    else:
-                        marks_awarded, justification, feedback, reduction_reasons, ai_recommendation, rubrick_guidelines, rubrick_marks = keyword_based_scoring(
-                            student_answer, keywords, max_marks, rubric_items
-                        )
-                        method_used = "keyword"
+                            method_used = "keyword"
+                        
+                        print(f"Evaluation completed for question {q_no}, marks: {marks_awarded}")
+                    except Exception as eval_error:
+                        print(f"Error in evaluation of question {q_no}: {str(eval_error)}")
+                        marks_awarded = 0
+                        method_used = "error"
+                        justification = f"Evaluation error: {str(eval_error)}"
+                        feedback = "No feedback available due to evaluation error."
+                        reduction_reasons = "Evaluation error"
+                        ai_recommendation = "Please review this question manually."
+                        rubrick_guidelines = []
+                        rubrick_marks = []
                 else:
+                    print(f"No student answer found for question {q_no}")
                     marks_awarded = 0
                     method_used = "skipped"
                     justification = "Answer not found in extracted content"
@@ -4025,9 +3990,11 @@ def process_and_evaluate_answer_sheet(request):
                     ai_recommendation = "No AI recommendation available."
                     rubrick_guidelines = []
                     rubrick_marks = []
-
+                
+                # Add marks to total
                 total_marks += marks_awarded
                 
+                # Add to evaluated answers
                 evaluated_answers.append({
                     "question_no": q_no,
                     "bloom_level": bloom_level,
@@ -4039,9 +4006,12 @@ def process_and_evaluate_answer_sheet(request):
                     "ai_recommendation": ai_recommendation,
                     "rubric_items": rubrick_guidelines,
                     "rubric_marks": rubrick_marks,
-                    "co": co  # Add CO to evaluated answers
+                    "co": co
                 })
             
+            print(f"All questions evaluated. Total marks: {total_marks}")
+            
+            # Create student result data
             student_result_data = {
                 "name": student.get("name"),
                 "evaluated_answers": evaluated_answers,
@@ -4052,15 +4022,27 @@ def process_and_evaluate_answer_sheet(request):
                 "subject_code": subject_code,
                 "subject_name": subject_name,
                 "register_number": register_number,
-                "exam_type": exam_type  # Add exam_type to student result
+                "exam_type": exam_type
             }
             
-            existing_exam_result = results_collection.find_one({"exam_id": str(exam_id)})
+            # Save to results collection
+            existing_exam_result = results_collection.find_one({
+                "$or": [
+                    {"exam_id": exam_id},
+                    {"exam_id": str(exam_id)}
+                ]
+            })
+            
+            # Insert or update results
+            print("Saving evaluation results to database...")
+            result_id = None
             
             if existing_exam_result:
+                result_id = existing_exam_result["_id"]
                 if "results" not in existing_exam_result:
+                    # Create initial results structure
                     results_collection.update_one(
-                        {"exam_id": str(exam_id)},
+                        {"_id": result_id},
                         {"$set": {
                             "results": {
                                 "subjects": [
@@ -4071,15 +4053,16 @@ def process_and_evaluate_answer_sheet(request):
                                     }
                                 ]
                             },
-                            "exam_type": exam_type  # Add exam_type at the top level
+                            "exam_type": exam_type
                         }}
                     )
-                    result_id = existing_exam_result["_id"]
                 else:
+                    # Update existing results
                     subjects = existing_exam_result.get("results", {}).get("subjects", [])
                     subject_exists = False
                     subject_idx = -1
                     
+                    # Find if subject exists
                     for idx, subj in enumerate(subjects):
                         if subj.get("subject_code") == subject_code:
                             subject_exists = True
@@ -4087,6 +4070,7 @@ def process_and_evaluate_answer_sheet(request):
                             break
                     
                     if subject_exists:
+                        # Find if student exists
                         students = subjects[subject_idx].get("students", [])
                         student_exists = False
                         student_idx = -1
@@ -4098,43 +4082,49 @@ def process_and_evaluate_answer_sheet(request):
                                 break
                         
                         if student_exists:
+                            # Update existing student
                             results_collection.update_one(
-                                {"exam_id": str(exam_id)},
+                                {"_id": result_id},
                                 {"$set": {
                                     f"results.subjects.{subject_idx}.students.{student_idx}": student_result_data,
-                                    "exam_type": exam_type  # Ensure exam_type is set
+                                    "exam_type": exam_type
                                 }}
                             )
                         else:
+                            # Add new student
                             results_collection.update_one(
-                                {"exam_id": str(exam_id)},
-                                {"$push": {
-                                    f"results.subjects.{subject_idx}.students": student_result_data
-                                },
-                                "$set": {
-                                    "exam_type": exam_type  # Ensure exam_type is set
-                                }}
+                                {"_id": result_id},
+                                {
+                                    "$push": {
+                                        f"results.subjects.{subject_idx}.students": student_result_data
+                                    },
+                                    "$set": {
+                                        "exam_type": exam_type
+                                    }
+                                }
                             )
                     else:
+                        # Add new subject
                         results_collection.update_one(
-                            {"exam_id": str(exam_id)},
-                            {"$push": {
-                                "results.subjects": {
-                                    "subject_code": subject_code,
-                                    "subject_name": subject_name,
-                                    "students": [student_result_data]
+                            {"_id": result_id},
+                            {
+                                "$push": {
+                                    "results.subjects": {
+                                        "subject_code": subject_code,
+                                        "subject_name": subject_name,
+                                        "students": [student_result_data]
+                                    }
+                                },
+                                "$set": {
+                                    "exam_type": exam_type
                                 }
-                            },
-                            "$set": {
-                                "exam_type": exam_type  # Ensure exam_type is set
-                            }}
+                            }
                         )
-                    
-                    result_id = existing_exam_result["_id"]
             else:
+                # Create new results document
                 result = results_collection.insert_one({
                     "exam_id": str(exam_id),
-                    "exam_type": exam_type,  # Add exam_type at the top level
+                    "exam_type": exam_type,
                     "results": {
                         "subjects": [
                             {
@@ -4147,6 +4137,8 @@ def process_and_evaluate_answer_sheet(request):
                 })
                 result_id = result.inserted_id
             
+            # Update answer sheet with evaluation status
+            print("Updating answer sheet status to 'evaluated'")
             if "student_id" in answer_sheet:
                 answer_sheet_collection.update_one(
                     {"_id": ObjectId(answer_sheet_id)},
@@ -4176,10 +4168,12 @@ def process_and_evaluate_answer_sheet(request):
                                 break
                         break
             
+            # Clean up
             try:
                 os.remove(temp_pdf_path)
-            except:
-                pass
+                print(f"Temporary PDF file {temp_pdf_path} deleted")
+            except Exception as cleanup_error:
+                print(f"Warning: Failed to delete temp file {temp_pdf_path}: {str(cleanup_error)}")
             
             return JsonResponse({
                 "message": "Answer sheet processed and evaluated successfully",
@@ -4189,16 +4183,19 @@ def process_and_evaluate_answer_sheet(request):
             }, status=200)
             
         except Exception as eval_error:
-            print(f"Evaluation error: {str(eval_error)}")
+            print(f"Error in evaluation process: {str(eval_error)}")
+            print(f"Traceback: {traceback.format_exc()}")
+            
             return JsonResponse({
-                "message": "Answer sheet processed successfully but evaluation failed",
+                "message": "Answer sheet processed but evaluation failed",
                 "extracted_answers": len(answers),
                 "evaluation_error": str(eval_error)
             }, status=200)
         
     except Exception as e:
-        print(f"Error in process_and_evaluate_answer_sheet: {str(e)}")
-        return JsonResponse({"error": str(e)}, status=500)         
+        print(f"Critical error in process_and_evaluate_answer_sheet: {str(e)}")
+        print(f"Traceback: {traceback.format_exc()}")
+        return JsonResponse({"error": str(e)}, status=500)  
 
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
@@ -4558,11 +4555,32 @@ def update_staff_mark(request):
         return JsonResponse({"error": "Invalid request method"}, status=405)
 
     try:
-        data = json.loads(request.body)
+        # First try to parse JSON data
+        try:
+            data = json.loads(request.body)
+        except json.JSONDecodeError:
+            # Fallback to form data
+            data = {
+                "exam_id": request.POST.get("exam_id"),
+                "register_number": request.POST.get("register_number"),
+                "subject_code": request.POST.get("subject_code"),
+                "staff_mark": request.POST.get("staff_mark")
+            }
+            # Convert staff_mark to int/float if it's a string
+            if isinstance(data["staff_mark"], str) and data["staff_mark"].strip():
+                try:
+                    data["staff_mark"] = float(data["staff_mark"])
+                    if data["staff_mark"].is_integer():
+                        data["staff_mark"] = int(data["staff_mark"])
+                except ValueError:
+                    return JsonResponse({"error": "Invalid staff mark format"}, status=400)
+        
         exam_id = data.get("exam_id")
         register_number = data.get("register_number")
         subject_code = data.get("subject_code")
         staff_mark = data.get("staff_mark")
+
+        print(f"Received staff mark update: {exam_id=}, {register_number=}, {subject_code=}, {staff_mark=}")
 
         if not all([exam_id, register_number, subject_code]):
             return JsonResponse({"error": "Missing required fields"}, status=400)
@@ -4571,11 +4589,23 @@ def update_staff_mark(request):
         if staff_mark is not None and (not isinstance(staff_mark, (int, float)) or staff_mark < 0 or staff_mark > 100):
             return JsonResponse({"error": "Invalid staff mark. Must be between 0 and 100."}, status=400)
 
+        # Try both ObjectId and string format for exam_id
+        exam_id_query = {"$or": [{"exam_id": exam_id}, {"exam_id": str(exam_id)}]}
+        if ObjectId.is_valid(exam_id):
+            exam_id_query["$or"].append({"exam_id": ObjectId(exam_id)})
+
         # Find the existing result document
-        existing_exam_result = results_collection.find_one({"exam_id": str(exam_id)})
+        existing_exam_result = results_collection.find_one(exam_id_query)
 
         if not existing_exam_result:
-            return JsonResponse({"error": "Exam result not found"}, status=404)
+            print(f"Exam result not found for query: {exam_id_query}")
+            # Try to find by directly using _id
+            if ObjectId.is_valid(exam_id):
+                existing_exam_result = results_collection.find_one({"_id": ObjectId(exam_id)})
+                if not existing_exam_result:
+                    return JsonResponse({"error": "Exam result not found"}, status=404)
+            else:
+                return JsonResponse({"error": "Exam result not found"}, status=404)
 
         # Navigate through the results to find the student
         updated = False
@@ -4586,7 +4616,7 @@ def update_staff_mark(request):
                     if student.get("register_number") == register_number:
                         # Update staff mark
                         update_result = results_collection.update_one(
-                            {"exam_id": str(exam_id)},
+                            {"_id": existing_exam_result["_id"]},
                             {"$set": {
                                 f"results.subjects.{i}.students.{j}.staff_mark": staff_mark
                             }}
@@ -4599,29 +4629,49 @@ def update_staff_mark(request):
             return JsonResponse({"error": "Student or subject not found in results"}, status=404)
 
         # Update answer sheet collection if needed
-        answer_sheet = answer_sheet_collection.find_one({
-            "exam_id": exam_id,
-            "subjects": {
-                "$elemMatch": {
-                    "subject_code": subject_code,
-                    "students": {
-                        "$elemMatch": {
-                            "student_id": register_number
-                        }
-                    }
-                }
-            }
-        })
-
-        if answer_sheet:
-            answer_sheet_id = str(answer_sheet["_id"])
-            answer_sheet_collection.update_one(
-                {"_id": ObjectId(answer_sheet_id)},
-                {"$set": {
-                    "staff_mark": staff_mark,
-                    "staff_mark_updated_at": datetime.now()
-                }}
-            )
+        answer_sheet_query = {
+            "$or": [
+                {"exam_id": exam_id},
+                {"exam_id": str(exam_id)}
+            ]
+        }
+        if ObjectId.is_valid(exam_id):
+            answer_sheet_query["$or"].append({"exam_id": ObjectId(exam_id)})
+            
+        answer_sheets = list(answer_sheet_collection.find(answer_sheet_query))
+        
+        for answer_sheet in answer_sheets:
+            updated_answer_sheet = False
+            
+            # Handle nested structure
+            if "subjects" in answer_sheet:
+                for s_idx, subj in enumerate(answer_sheet.get("subjects", [])):
+                    if subj.get("subject_code") == subject_code:
+                        for st_idx, stu in enumerate(subj.get("students", [])):
+                            if stu.get("student_id") == register_number:
+                                answer_sheet_collection.update_one(
+                                    {"_id": answer_sheet["_id"]},
+                                    {"$set": {
+                                        f"subjects.{s_idx}.students.{st_idx}.staff_mark": staff_mark,
+                                        f"subjects.{s_idx}.students.{st_idx}.staff_mark_updated_at": datetime.now()
+                                    }}
+                                )
+                                updated_answer_sheet = True
+                                break
+            
+            # Handle flat structure
+            elif answer_sheet.get("subject_code") == subject_code and answer_sheet.get("student_id") == register_number:
+                answer_sheet_collection.update_one(
+                    {"_id": answer_sheet["_id"]},
+                    {"$set": {
+                        "staff_mark": staff_mark,
+                        "staff_mark_updated_at": datetime.now()
+                    }}
+                )
+                updated_answer_sheet = True
+                
+            if updated_answer_sheet:
+                print(f"Updated answer sheet {answer_sheet['_id']} with staff mark {staff_mark}")
 
         return JsonResponse({
             "message": "Staff mark updated successfully",
@@ -4629,9 +4679,10 @@ def update_staff_mark(request):
         }, status=200)
 
     except Exception as e:
+        import traceback
         print(f"Error in update_staff_mark: {str(e)}")
+        print(traceback.format_exc())
         return JsonResponse({"error": str(e)}, status=500)
-
 
 #=============================================RUBRICKS=========================================
 

@@ -19,3 +19,4 @@ boto3
 pdfplumber
 pdf2image
 pandas
+gunicorn==20.0.4

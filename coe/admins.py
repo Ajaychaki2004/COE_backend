@@ -24,6 +24,8 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from django.core.mail import send_mail
 from django.conf import settings
+import pandas as pd
+import re
 
 load_dotenv()
 
@@ -628,30 +630,91 @@ def get_departments_by_college(request):
 
 @csrf_exempt
 def get_department_by_id(request, dept_id):
-    if request.method != "GET":
+    if request.method != "POST":
         return JsonResponse({'error': 'Invalid request method'}, status=405)
 
     try:
-        department = db.department.find_one({"_id": ObjectId(dept_id)})
+        data = json.loads(request.body)
+        department_name = data.get("department")
+        batch = data.get("batch")
 
-        if not department:
-            return JsonResponse({'error': 'Department not found'}, status=404)
+        # Build query filter based on request data
+        exam_filter = {}
+        
+        # Add filters if provided
+        if department_name:
+            exam_filter["department"] = department_name
+        if batch:
+            exam_filter["batch"] = batch
 
-        department_info = {
-            "_id": str(department["_id"]),
-            "department": department["department"],
-            "college_name": department["college_name"],
-            "subjects": department.get("subjects", []),
-            "hod": department.get("hod", {}).get("name", "") if isinstance(department.get("hod"), dict) else department.get("hod", ""),
-            "created_at": department["created_at"].isoformat(),
-            "updated_at": department["updated_at"].isoformat()
-        }
+        # If no filters provided, return error
+        if not exam_filter:
+            return JsonResponse({'error': 'Department or batch parameter required'}, status=400)
 
-        return JsonResponse({"department": department_info}, status=200)
+        # Find all exams matching the criteria
+        exams_cursor = exam_collection.find(exam_filter)
+        exams_list = list(exams_cursor)
 
+        if not exams_list:
+            return JsonResponse({'error': 'No exams found'}, status=404)
+
+        # Collect unique subjects with only essential information
+        unique_subjects = []
+        seen_subjects = set()
+        empty_examtype_ids = []  # Collect IDs and details of exams with empty examtype
+        seen_semesters = set()  # Track semesters that already have an empty exam_type entry
+
+        # Process all exams and collect subjects
+        for exam in exams_list:
+            exam_subjects = exam.get("subjects", [])
+            exam_year = exam.get("year", "")
+            exam_semester = exam.get("semester", "")
+            exam_type = exam.get("exam_type", "")  # Changed from "examtype" to "exam_type"
+            exam_department = exam.get("department", "")
+            exam_batch = exam.get("batch", "")
+            
+            # Check if exam_type is empty and collect the _id only if it matches the requested filters
+            if not exam_type or exam_type.strip() == "":
+                # Only add to empty_examtype_ids if it matches the requested department and batch
+                matches_filter = True
+                if department_name and exam_department != department_name:
+                    matches_filter = False
+                if batch and exam_batch != batch:
+                    matches_filter = False
+                
+                # Only add exam ID with semester info if it matches all requested filters
+                # and if we haven't already added an exam for this semester
+                if matches_filter and exam_semester not in seen_semesters:
+                    empty_examtype_ids.append({
+                        "exam_id": str(exam["_id"]),
+                        "semester": exam_semester
+                    })
+                    seen_semesters.add(exam_semester)  # Mark this semester as processed
+            
+            for subject in exam_subjects:
+                # Create a unique identifier for each subject
+                subject_identifier = subject.get("subject_code") or subject.get("subject_name")
+                if subject_identifier and subject_identifier not in seen_subjects:
+                    seen_subjects.add(subject_identifier)
+                    # Include essential subject information with year and semester from exam
+                    subject_info = {
+                        "subject_name": subject.get("subject_name", ""),
+                        "subject_code": subject.get("subject_code", ""),
+                        "year": exam_year,  # Get from exam level
+                        "semester": exam_semester  # Get from exam level
+                    }
+                    unique_subjects.append(subject_info)
+
+        return JsonResponse({
+            "unique_subjects": unique_subjects,
+            "total_subjects": len(unique_subjects),
+            "empty_examtype_ids": empty_examtype_ids
+        }, status=200)
+
+    except json.JSONDecodeError:
+        return JsonResponse({'error': 'Invalid JSON format'}, status=400)
     except Exception as e:
         return JsonResponse({'error': str(e)}, status=500)
-
 @csrf_exempt
 def edit_department(request, dept_id):
     if request.method != "PUT":
@@ -745,7 +808,7 @@ def delete_department(request, dept_id):
 
 #         # Case-insensitive subject name and ID uniqueness check
 #         for subj in department.get("subjects", []):
-#             print(f"Checking subject: {subj['subject_name']} (id: {subj['subject_id']}, semester: {subj.get('semester')}) against {subject_name} (id: {subject_id}, semester: {semester})")
+#             print(f"Checking subject: {subj['subject_name']} (id: {subj['subject_id']}, semester: {subj.get('semester')})")
 #             if subj["subject_name"].lower() == subject_name.lower() and subj.get("semester") == semester:
 #                 return JsonResponse({'error': 'Subject name already exists for the given semester in department'}, status=409)
 #             if subj["subject_id"] == subject_id and subj.get("semester") == semester:
@@ -1573,97 +1636,3 @@ def reset_password(request):
 
 
 #======================================================== ASSIGN SUBJECT TO DEPARTMENT ===========================================================================
-
-
-@csrf_exempt
-def assign_subject_to_department(request):
-    """
-    Assigns/appends a subject to a department's subjects array.
-    Validates input data and checks for duplicates based on subject_id, subject_name, and semester.
-    """
-    if request.method != "POST":
-        return JsonResponse({'error': 'Invalid method'}, status=405)
-
-    try:
-        data = json.loads(request.body)
-        dept_id = data.get("dept_id")
-        subject_id = data.get("subject_id")
-        subject_name = data.get("subject_name")
-        semester = data.get("semester")
-
-        if not all([dept_id, subject_id, subject_name, semester]):
-            return JsonResponse({'error': 'Missing required fields: dept_id, subject_id, subject_name, semester'}, status=400)
-
-        # Validate semester range
-        if not isinstance(semester, int) or semester < 1 or semester > 8:
-            return JsonResponse({'error': 'Semester must be an integer between 1 and 8'}, status=400)
-
-        # Calculate year based on semester
-        year = 1 if semester in [1, 2] else (semester + 1) // 2
-
-        # Validate subject_id and subject_name format
-        if not re.match(r'^[A-Za-z0-9]+$', subject_id):
-            return JsonResponse({'error': 'Subject ID must contain only alphanumeric characters'}, status=400)
-        
-        if not re.match(r'^[A-Za-z0-9\s\-&]+$', subject_name):
-            return JsonResponse({'error': 'Subject name contains invalid characters'}, status=400)
-
-        # Find the department
-        try:
-            department = db.department.find_one({"_id": ObjectId(dept_id)})
-        except Exception as e:
-            return JsonResponse({'error': 'Invalid department ID format'}, status=400)
-
-        if not department:
-            return JsonResponse({'error': 'Department not found'}, status=404)
-
-        # Check for duplicate subject_id or subject_name within the same semester
-        for existing_subject in department.get("subjects", []):
-            if existing_subject["subject_id"].lower() == subject_id.lower():
-                return JsonResponse({
-                    'error': f'Subject ID "{subject_id}" already exists in this department'
-                }, status=409)
-            
-            if (existing_subject["subject_name"].lower() == subject_name.lower() and 
-                existing_subject.get("semester") == semester):
-                return JsonResponse({
-                    'error': f'Subject "{subject_name}" already exists for semester {semester} in this department'
-                }, status=409)
-
-        # Create new subject object
-        new_subject = {
-            "subject_id": subject_id,
-            "subject_name": subject_name,
-            "semester": semester,
-            "year": year
-        }
-
-        # Append the subject to the department's subjects array
-        result = db.department.update_one(
-            {"_id": ObjectId(dept_id)},
-            {
-                "$push": {"subjects": new_subject},
-                "$set": {"updated_at": datetime.now()}
-            }
-        )
-
-        if result.matched_count == 0:
-            return JsonResponse({'error': 'Department not found'}, status=404)
-
-        if result.modified_count == 0:
-            return JsonResponse({'error': 'Failed to add subject to department'}, status=500)
-
-        return JsonResponse({
-            'message': 'Subject added successfully to department',
-            'subject': new_subject,
-            'department_id': dept_id
-        }, status=200)
-
-    except json.JSONDecodeError:
-        return JsonResponse({'error': 'Invalid JSON format'}, status=400)
-    except Exception as e:
-        print(f"Error in assign_subject_to_department: {str(e)}")
-        return JsonResponse({'error': str(e)}, status=500)
-    
-
-
