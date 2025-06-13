@@ -673,7 +673,7 @@ def process_answer_sheet_with_ai(pdf_path, exam_id, student_id):
                 poppler_path = r'C:\Program Files\poppler-24.08.0\Library\bin'
                 print(f"Using Poppler path (Windows): {poppler_path}")
                 try:
-                    pages = convert_from_path(pdf_path, poppler_path=poppler_path)
+                    pages = convert_from_path(pdf_path, poppler_path=poppler_path,dpi=100
                 except Exception as e:
                     print(f"Failed with poppler_path: {e}")
                     return []
